@@ -49,6 +49,7 @@ struct TPMBackend {
     char *id;
     enum TpmModel fe_model;
     char *path;
+    char *ctrl_path;
     char *cancel_path;
     const TPMDriverOps *ops;
 

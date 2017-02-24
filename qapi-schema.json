@@ -3959,10 +3959,11 @@
 # An enumeration of TPM types
 #
 # @passthrough: TPM passthrough type
+# @unixio-tpm: unixio TPM type
 #
 # Since: 1.5
 ##
-{ 'enum': 'TpmType', 'data': [ 'passthrough' ] }
+{ 'enum': 'TpmType', 'data': [ 'passthrough', 'unixio-tpm' ] }
 
 ##
 # @query-tpm-types:
@@ -3988,7 +3989,21 @@
 # Since: 1.5
 ##
 { 'struct': 'TPMPassthroughOptions', 'data': { '*path' : 'str',
-                                             '*cancel-path' : 'str'} }
+                                               '*cancel-path' : 'str',
+                                               '*ctrl-path' : 'str' } }
+
+##
+##
+# @TPMUnixioOptions:
+#
+# Information about the unixio TPM type
+#
+# @path: string describing the path used for accessing the TPM device
+# @ctrl-path: string describing the unix socket path used for accessing out-of-bound messages
+#
+# Since: 2.6
+##
+{ 'struct': 'TPMUnixioOptions', 'data': { 'path' : 'str', 'ctrl-path': 'str' } }
 
 ##
 # @TpmTypeOptions:
@@ -4000,7 +4015,8 @@
 # Since: 1.5
 ##
 { 'union': 'TpmTypeOptions',
-   'data': { 'passthrough' : 'TPMPassthroughOptions' } }
+   'data': { 'passthrough' : 'TPMPassthroughOptions',
+             'unixio-tpm' : 'TPMUnixioOptions' } }
 
 ##
 # @TPMInfo:
