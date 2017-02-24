@@ -49,6 +49,7 @@
 #define TPM_PASSTHROUGH(obj) \
     OBJECT_CHECK(TPMPassthruState, (obj), TYPE_TPM_PASSTHROUGH)
 #define TYPE_TPM_CUSE "tpm-cuse"
+#define TYPE_TPM_UNIXIO "tpm-unixio"
 
 static const TPMDriverOps tpm_passthrough_driver;
 static const VMStateDescription vmstate_tpm_cuse;
@@ -73,6 +74,7 @@ struct TPMPassthruState {
 
     char *tpm_dev;
     int tpm_fd;
+    int tpm_ctrl_fd;
     bool tpm_executing;
     bool tpm_op_canceled;
     int cancel_fd;
@@ -98,6 +100,8 @@ typedef struct TPMPassthruState TPMPassthruState;
 #define TPM_PASSTHROUGH_USES_CUSE_TPM(tpm_pt) (tpm_pt->cuse_cap != 0)
 
 #define TPM_CUSE_IMPLEMENTS_ALL(S, cap) (((S)->cuse_cap & (cap)) == (cap))
+
+#define TPM_PASSTHROUGH_IS_CUSE_DEV(tpm_pt) ((bool)(tpm_pt->tpm_dev))
 
 /* functions */
 
@@ -174,14 +178,25 @@ static int tpm_passthrough_set_locality(TPMPassthruState *tpm_pt,
                                         uint8_t locty_number)
 {
     ptm_loc loc;
+    bool is_cuse = TPM_PASSTHROUGH_IS_CUSE_DEV(tpm_pt);
+    int tpm_fd = is_cuse ? tpm_pt->tpm_fd : tpm_pt->tpm_ctrl_fd;
 
     if (TPM_PASSTHROUGH_USES_CUSE_TPM(tpm_pt)) {
         if (tpm_pt->cur_locty_number != locty_number) {
-            loc.u.req.loc = locty_number;
-            if (ioctl(tpm_pt->tpm_fd, PTM_SET_LOCALITY, &loc) < 0) {
-                error_report("tpm_cuse: could not set locality on "
-                             "CUSE TPM: %s",
+            DPRINTF("cuse-tpm: setting locality : 0x%x", locty_number);
+            loc.u.req.loc = is_cuse ? locty_number : cpu_to_be32(locty_number);
+            if (tpm_util_ctrlcmd(tpm_fd, is_cuse, PTM_SET_LOCALITY, &loc,
+                                 sizeof(loc), sizeof(loc)) < 0) {
+                error_report("tpm_cuse: could not set locality on CUSE TPM: %s",
                              strerror(errno));
+                return -1;
+            }
+            if (!is_cuse) {
+                loc.u.resp.tpm_result = be32_to_cpu(loc.u.resp.tpm_result);
+            }
+            if (loc.u.resp.tpm_result != TPM_SUCCESS) {
+                error_report("tpm_cuse: TPM result for set locality : 0x%x",
+                             loc.u.resp.tpm_result);
                 return -1;
             }
             tpm_pt->cur_locty_number = locty_number;
@@ -308,10 +323,16 @@ static void tpm_passthrough_shutdown(TPMPassthruState *tpm_pt)
     ptm_res res;
 
     if (TPM_PASSTHROUGH_USES_CUSE_TPM(tpm_pt)) {
-        if (ioctl(tpm_pt->tpm_fd, PTM_SHUTDOWN, &res) < 0) {
-            error_report("tpm_cuse: Could not cleanly shut down "
-                         "the CUSE TPM: %s",
+        bool is_cuse = TPM_PASSTHROUGH_IS_CUSE_DEV(tpm_pt);
+        int tpm_fd = is_cuse ? tpm_pt->tpm_fd : tpm_pt->tpm_ctrl_fd;
+
+        if (tpm_util_ctrlcmd(tpm_fd, is_cuse, PTM_SHUTDOWN, &res, 0, sizeof(res)) < 0) {
+            error_report("tpm_cuse: Could not cleanly shut down the CUSE TPM: %s",
                          strerror(errno));
+        }
+        if (res != TPM_SUCCESS) {
+            error_report("tpm_cuse: TPM result for sutdown: 0x%x",
+                         is_cuse ? res : be32_to_cpu(res));
         }
     }
     if (tpm_pt->migration_blocker) {
@@ -326,14 +347,20 @@ static void tpm_passthrough_shutdown(TPMPassthruState *tpm_pt)
  */
 static int tpm_passthrough_cuse_probe(TPMPassthruState *tpm_pt)
 {
-    int rc = 0;
+    bool is_cuse = TPM_PASSTHROUGH_IS_CUSE_DEV(tpm_pt);
+    int tpm_fd = is_cuse ? tpm_pt->tpm_fd : tpm_pt->tpm_ctrl_fd;
 
-    if (ioctl(tpm_pt->tpm_fd, PTM_GET_CAPABILITY, &tpm_pt->cuse_cap) < 0) {
+    if (tpm_util_ctrlcmd(tpm_fd, is_cuse, PTM_GET_CAPABILITY, &tpm_pt->cuse_cap,
+                         0, sizeof(tpm_pt->cuse_cap)) < 0) {
         error_report("Error: CUSE TPM was requested, but probing failed");
-        rc = -1;
+        return -1;
     }
 
-    return rc;
+    if (!is_cuse) tpm_pt->cuse_cap = be64_to_cpu(tpm_pt->cuse_cap);
+ 
+    DPRINTF("capbilities : 0x%lx\n", tpm_pt->cuse_cap);
+
+    return 0;
 }
 
 static int tpm_passthrough_cuse_check_caps(TPMPassthruState *tpm_pt)
@@ -375,22 +402,32 @@ static int tpm_passthrough_cuse_check_caps(TPMPassthruState *tpm_pt)
 static int tpm_passthrough_cuse_init(TPMPassthruState *tpm_pt,
                                      bool is_resume)
 {
-    int rc = 0;
     ptm_init init;
+    ptm_res res;
+    bool is_cuse = TPM_PASSTHROUGH_IS_CUSE_DEV(tpm_pt);
+    int tpm_fd = is_cuse ? tpm_pt->tpm_fd : tpm_pt->tpm_ctrl_fd;
+
     if (is_resume) {
-        init.u.req.init_flags = PTM_INIT_FLAG_DELETE_VOLATILE;
+        init.u.req.init_flags = is_cuse ? PTM_INIT_FLAG_DELETE_VOLATILE :
+                                cpu_to_be32(PTM_INIT_FLAG_DELETE_VOLATILE);
     }
 
     if (TPM_PASSTHROUGH_USES_CUSE_TPM(tpm_pt)) {
-        if (ioctl(tpm_pt->tpm_fd, PTM_INIT, &init) < 0) {
-            error_report("tpm_cuse: Detected CUSE TPM but could not "
-                         "send INIT: %s",
-                         strerror(errno));
-            rc = -1;
+        if (tpm_util_ctrlcmd(tpm_fd, is_cuse, PTM_INIT, &init, sizeof(init),
+                             sizeof(init)) < 0) {
+            error_report("tpm_cuse: Detected CUSE TPM but could not send INIT:"
+                         "%s", strerror(errno));
+            return -1;
+        }
+        res = is_cuse ? init.u.resp.tpm_result :
+                        be32_to_cpu(init.u.resp.tpm_result); 
+        if (res != TPM_SUCCESS) {
+            error_report("tpm_cuse: TPM result for PTM_INIT: 0x%x", res);
+            return -1;
         }
     }
 
-    return rc;
+    return 0;
 }
 
 /*
@@ -446,12 +483,14 @@ static bool tpm_passthrough_get_tpm_established_flag(TPMBackend *tb)
 {
     TPMPassthruState *tpm_pt = TPM_PASSTHROUGH(tb);
     ptm_est est;
+    bool is_cuse = TPM_PASSTHROUGH_IS_CUSE_DEV(tpm_pt);
+    int tpm_fd = is_cuse ? tpm_pt->tpm_fd : tpm_pt->tpm_ctrl_fd;
 
     if (TPM_PASSTHROUGH_USES_CUSE_TPM(tpm_pt)) {
-        if (ioctl(tpm_pt->tpm_fd, PTM_GET_TPMESTABLISHED, &est) < 0) {
+        if (tpm_util_ctrlcmd(tpm_fd, is_cuse, PTM_GET_TPMESTABLISHED, &est, 0,
+                             sizeof(est)) < 0) {
             error_report("tpm_cuse: Could not get the TPM established "
-                         "flag from the CUSE TPM: %s",
-                         strerror(errno));
+                         "flag from the CUSE TPM: %s", strerror(errno));
             return false;
         }
         return (est.u.resp.bit != 0);
@@ -464,19 +503,32 @@ static int tpm_passthrough_reset_tpm_established_flag(TPMBackend *tb,
 {
     TPMPassthruState *tpm_pt = TPM_PASSTHROUGH(tb);
     int rc = 0;
+    ptm_res res;
     ptm_reset_est ptmreset_est;
+    bool is_cuse = TPM_PASSTHROUGH_IS_CUSE_DEV(tpm_pt);
+    int tpm_fd = is_cuse ? tpm_pt->tpm_fd : tpm_pt->tpm_ctrl_fd;
 
     /* only a TPM 2.0 will support this */
     if (tpm_pt->tpm_version == TPM_VERSION_2_0) {
         if (TPM_PASSTHROUGH_USES_CUSE_TPM(tpm_pt)) {
-            ptmreset_est.u.req.loc = tpm_pt->cur_locty_number;
+            ptmreset_est.u.req.loc = is_cuse ? tpm_pt->cur_locty_number
+                                     : cpu_to_be32(tpm_pt->cur_locty_number);
 
-            if (ioctl(tpm_pt->tpm_fd, PTM_RESET_TPMESTABLISHED,
-                      &ptmreset_est) < 0) {
+            if (tpm_util_ctrlcmd(tpm_fd, is_cuse, PTM_RESET_TPMESTABLISHED,
+                                 &ptmreset_est, sizeof(ptmreset_est),
+                                 sizeof(ptmreset_est)) < 0) {
                 error_report("tpm_cuse: Could not reset the establishment bit "
-                             "failed: %s",
-                             strerror(errno));
+                             "failed: %s", strerror(errno));
                 rc = -1;
+            } else {
+                res = is_cuse ? ptmreset_est.u.resp.tpm_result
+                              : be32_to_cpu(ptmreset_est.u.resp.tpm_result);
+
+                if (res != TPM_SUCCESS) {
+                    error_report("tpm_cuse: TPM result for rest establixhed"
+                                 " flag: 0x%x", res);
+                    rc = 1;
+                }
             }
         }
     }
@@ -488,10 +540,12 @@ static int tpm_cuse_get_state_blobs(TPMBackend *tb,
                                     TPMBlobBuffers *tpm_blobs)
 {
     TPMPassthruState *tpm_pt = TPM_PASSTHROUGH(tb);
+    bool is_cuse = TPM_PASSTHROUGH_IS_CUSE_DEV(tpm_pt);
+    int tpm_fd = is_cuse ? tpm_pt->tpm_fd : tpm_pt->tpm_ctrl_fd;
 
     assert(TPM_PASSTHROUGH_USES_CUSE_TPM(tpm_pt));
 
-    return tpm_util_cuse_get_state_blobs(tpm_pt->tpm_fd, decrypted_blobs,
+    return tpm_util_cuse_get_state_blobs(tpm_fd, is_cuse, decrypted_blobs,
                                          tpm_blobs);
 }
 
@@ -499,10 +553,12 @@ static int tpm_cuse_set_state_blobs(TPMBackend *tb,
                                     TPMBlobBuffers *tpm_blobs)
 {
     TPMPassthruState *tpm_pt = TPM_PASSTHROUGH(tb);
+    bool is_cuse = TPM_PASSTHROUGH_IS_CUSE_DEV(tpm_pt);
+    int tpm_fd = is_cuse ? tpm_pt->tpm_fd : tpm_pt->tpm_ctrl_fd;
 
     assert(TPM_PASSTHROUGH_USES_CUSE_TPM(tpm_pt));
 
-    if (tpm_util_cuse_set_state_blobs(tpm_pt->tpm_fd, tpm_blobs)) {
+    if (tpm_util_cuse_set_state_blobs(tpm_fd, is_cuse, tpm_blobs)) {
         return 1;
     }
 
@@ -553,15 +609,19 @@ static void tpm_passthrough_cancel_cmd(TPMBackend *tb)
      */
     if (tpm_pt->tpm_executing) {
         if (TPM_PASSTHROUGH_USES_CUSE_TPM(tpm_pt)) {
+            bool is_cuse = TPM_PASSTHROUGH_IS_CUSE_DEV(tpm_pt);
+            int tpm_fd = is_cuse ? tpm_pt->tpm_fd : tpm_pt->tpm_ctrl_fd;
+
             if (TPM_CUSE_IMPLEMENTS_ALL(tpm_pt, PTM_CAP_CANCEL_TPM_CMD)) {
-                if (ioctl(tpm_pt->tpm_fd, PTM_CANCEL_TPM_CMD, &res) < 0) {
+                if (tpm_util_ctrlcmd(tpm_fd, is_cuse, PTM_CANCEL_TPM_CMD, &res,
+                                     0, sizeof(res)) < 0) {
                     error_report("tpm_cuse: Could not cancel command on "
-                                 "CUSE TPM: %s",
-                                 strerror(errno));
+                                 "CUSE TPM: %s", strerror(errno));
                 } else if (res != TPM_SUCCESS) {
                     if (!error_printed) {
                         error_report("TPM error code from command "
-                                     "cancellation of CUSE TPM: 0x%x", res);
+                                     "cancellation of CUSE TPM: 0x%x", 
+                                     is_cuse ? res : be32_to_cpu(res));
                         error_printed = true;
                     }
                 } else {
@@ -623,7 +683,7 @@ static int tpm_passthrough_open_sysfs_cancel(TPMBackend *tb)
         return fd;
     }
 
-    dev = strrchr(tpm_pt->tpm_dev, '/');
+    dev = tpm_pt->tpm_dev ? strrchr(tpm_pt->tpm_dev, '/') : NULL;
     if (dev) {
         dev++;
         if (snprintf(path, sizeof(path), "/sys/class/misc/%s/device/cancel",
@@ -668,10 +728,13 @@ static int tpm_passthrough_handle_device_opts(QemuOpts *opts, TPMBackend *tb)
     TPMPassthruState *tpm_pt = TPM_PASSTHROUGH(tb);
     const char *value;
     bool have_cuse = false;
+    bool have_unixio = false;
 
     value = qemu_opt_get(opts, "type");
-    if (value != NULL && !strcmp("cuse-tpm", value)) {
-        have_cuse = true;
+    if (value != NULL) {
+        if (!(have_cuse = !strcmp("cuse-tpm", value))) {
+            have_unixio = !strcmp("unixio-tpm", value);
+        }
     }
 
     value = qemu_opt_get(opts, "cancel-path");
@@ -680,26 +743,50 @@ static int tpm_passthrough_handle_device_opts(QemuOpts *opts, TPMBackend *tb)
     value = qemu_opt_get(opts, "path");
     if (!value) {
         if (have_cuse) {
-            error_report("Missing path to access CUSE TPM");
+            error_report("cuse-tpm: Missing path to access CUSE TPM");
+            goto err_free_parameters;
+        } else if (have_unixio) {
+            error_report("unixio-tpm: Missing socket path to access TPM");
             goto err_free_parameters;
         }
         value = TPM_PASSTHROUGH_DEFAULT_DEVICE;
     }
 
-    tpm_pt->tpm_dev = g_strdup(value);
+    if (have_unixio) {
+        tpm_pt->tpm_dev = NULL;
+    } else {
+        tpm_pt->tpm_dev = g_strdup(value);
+    }
+    tb->path = g_strdup(value);
 
-    tb->path = g_strdup(tpm_pt->tpm_dev);
-
-    tpm_pt->tpm_fd = qemu_open(tpm_pt->tpm_dev, O_RDWR);
-    if (tpm_pt->tpm_fd < 0) {
-        error_report("Cannot access TPM device using '%s': %s",
+    if (have_unixio) {
+        if ((tpm_pt->tpm_fd = tpm_util_unixio_connect(tb->path)) < 0) {
+            error_report("Cannot access TPM server using '%s': %s",
+                          tb->path, strerror(errno));
+            goto err_free_parameters;
+        }
+        if (!(value = qemu_opt_get(opts, "ctrl-path"))) {
+            error_report("unixio-tpm: Missing control socket path to access TPM");
+            goto err_close_tpmdev;
+        }
+        tb->ctrl_path = g_strdup(value);
+        if ((tpm_pt->tpm_ctrl_fd = tpm_util_unixio_connect(tb->ctrl_path)) < 0) {
+           error_report("Cannot access TPM device using '%s': %s",
+                             value, strerror(errno));
+            goto err_close_tpmdev;
+        }
+    } else {
+        tpm_pt->tpm_fd = qemu_open(tpm_pt->tpm_dev, O_RDWR);
+        if (tpm_pt->tpm_fd < 0) {
+            error_report("Cannot access TPM device using '%s': %s",
                      tpm_pt->tpm_dev, strerror(errno));
-        goto err_free_parameters;
+            goto err_free_parameters;
+        }
     }
 
-    tpm_pt->cur_locty_number = ~0;
-
-    if (have_cuse) {
+    if (have_unixio || have_cuse) {
+        tpm_pt->cur_locty_number = ~0;
+ 
         if (tpm_passthrough_cuse_probe(tpm_pt)) {
             goto err_close_tpmdev;
         }
@@ -710,12 +797,11 @@ static int tpm_passthrough_handle_device_opts(QemuOpts *opts, TPMBackend *tb)
     }
 
     if (tpm_util_test_tpmdev(tpm_pt->tpm_fd, &tpm_pt->tpm_version)) {
-        error_report("'%s' is not a TPM device.",
-                     tpm_pt->tpm_dev);
+        error_report("'%s' is not a TPM device.", tb->path);
         goto err_close_tpmdev;
     }
 
-    if (have_cuse) {
+    if (have_cuse || have_unixio) {
         if (tpm_passthrough_cuse_check_caps(tpm_pt)) {
             goto err_close_tpmdev;
         }
@@ -728,8 +814,19 @@ static int tpm_passthrough_handle_device_opts(QemuOpts *opts, TPMBackend *tb)
  err_close_tpmdev:
     tpm_passthrough_shutdown(tpm_pt);
 
-    qemu_close(tpm_pt->tpm_fd);
-    tpm_pt->tpm_fd = -1;
+    if (have_unixio) {
+        if (tpm_pt->tpm_fd != -1) {
+            close(tpm_pt->tpm_fd);
+            tpm_pt->tpm_fd = -1;
+        }
+        if (tpm_pt->tpm_ctrl_fd != -1 ){
+            close(tpm_pt->tpm_ctrl_fd);
+            tpm_pt->tpm_ctrl_fd = -1;
+        }
+    } else {
+        qemu_close(tpm_pt->tpm_fd);
+        tpm_pt->tpm_fd = -1;
+    }
 
  err_free_parameters:
     g_free(tb->path);
@@ -737,6 +834,9 @@ static int tpm_passthrough_handle_device_opts(QemuOpts *opts, TPMBackend *tb)
 
     g_free(tpm_pt->tpm_dev);
     tpm_pt->tpm_dev = NULL;
+
+    g_free(tb->ctrl_path);
+    tb->ctrl_path = NULL;
 
     return 1;
 }
@@ -780,11 +880,22 @@ static void tpm_passthrough_destroy(TPMBackend *tb)
 
     tpm_passthrough_shutdown(tpm_pt);
 
-    qemu_close(tpm_pt->tpm_fd);
+    if (TPM_PASSTHROUGH_IS_CUSE_DEV(tpm_pt)) {
+        qemu_close(tpm_pt->tpm_fd);
+    } else {
+        if(tpm_pt->tpm_fd != -1) {
+            close(tpm_pt->tpm_fd);
+        }
+        if (tpm_pt->tpm_ctrl_fd != -1) {
+            close(tpm_pt->tpm_ctrl_fd);
+        }
+    }
+ 
     qemu_close(tpm_pt->cancel_fd);
 
     g_free(tb->id);
     g_free(tb->path);
+    g_free(tb->ctrl_path);
     g_free(tb->cancel_path);
     g_free(tpm_pt->tpm_dev);
 }
@@ -956,3 +1067,58 @@ static void tpm_cuse_register(void)
 }
 
 type_init(tpm_cuse_register)
+
+/* UNIXIO Driver */
+static const char *tpm_passthrough_unixio_create_desc(void)
+{
+    return "UNIX TPM backend driver";
+}
+
+static const QemuOptDesc tpm_passthrough_unixio_cmdline_opts[] = {
+    TPM_STANDARD_CMDLINE_OPTS,
+    {
+        .name = "path",
+        .type = QEMU_OPT_STRING,
+        .help = "Path to TPM device socket on the host",
+    },
+    {
+        .name = "ctrl-path",
+        .type = QEMU_OPT_STRING,
+        .help = "Path to TPM device on the host for out-of-bound messages",
+    },
+    { /* end of list */ },
+};
+static const TPMDriverOps tpm_unixio_driver = {
+    .type                     = TPM_TYPE_UNIXIO_TPM,
+    .opts                     = tpm_passthrough_unixio_cmdline_opts,
+    .desc                     = tpm_passthrough_unixio_create_desc,
+    .create                   = tpm_passthrough_create,
+    .destroy                  = tpm_passthrough_destroy,
+    .init                     = tpm_passthrough_init,
+    .startup_tpm              = tpm_passthrough_startup_tpm,
+    .realloc_buffer           = tpm_passthrough_realloc_buffer,
+    .reset                    = tpm_passthrough_reset,
+    .had_startup_error        = tpm_passthrough_get_startup_error,
+    .deliver_request          = tpm_passthrough_deliver_request,
+    .cancel_cmd               = tpm_passthrough_cancel_cmd,
+    .get_tpm_established_flag = tpm_passthrough_get_tpm_established_flag,
+    .reset_tpm_established_flag = tpm_passthrough_reset_tpm_established_flag,
+    .get_tpm_version          = tpm_passthrough_get_tpm_version,
+};
+
+static const TypeInfo tpm_unixio_info = {
+    .name = TYPE_TPM_UNIXIO,
+    .parent = TYPE_TPM_BACKEND,
+    .instance_size = sizeof(TPMPassthruState),
+    .class_init = tpm_passthrough_class_init,
+    .instance_init = tpm_passthrough_inst_init,
+    .instance_finalize = tpm_passthrough_inst_finalize,
+};
+
+static void tpm_unixio_register(void)
+{
+    type_register_static(&tpm_unixio_info);
+    tpm_register_driver(&tpm_unixio_driver);
+}
+
+type_init(tpm_unixio_register)

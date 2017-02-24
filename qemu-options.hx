@@ -2796,7 +2796,10 @@ DEF("tpmdev", HAS_ARG, QEMU_OPTION_tpmdev, \
     "                not provided it will be searched for in /sys/class/misc/tpm?/device\n"
     "-tpmdev cuse-tpm,id=id,path=path\n"
     "                use path to provide path to a character device to talk to the\n"
-    "                TPM emulator providing a CUSE interface\n",
+    "                TPM emulator providing a CUSE interface\n"
+    "-tpmdev unixio-tpm,id=id,path=path,ctrl-path=path\n"
+    "                use path to provide path to a unix socket path to talk to the\n",
+    "                TPM emulator for out-of-bound messages\n"
     QEMU_ARCH_ALL)
 STEXI
 
@@ -2806,7 +2809,7 @@ The general form of a TPM device option is:
 @item -tpmdev @var{backend} ,id=@var{id} [,@var{options}]
 @findex -tpmdev
 Backend type must be either one of the following:
-@option{passthrough}, @option{cuse-tpm}.
+@option{passthrough}, @option{cuse-tpm}, @option{unixio-tpm}.
 
 The specific backend type will determine the applicable options.
 The @code{-tpmdev} option creates the TPM backend and requires a
@@ -2866,6 +2869,19 @@ To create a backend device accessing the CUSE TPM emulator using /dev/vtpm
 use the following two options:
 @example
 -tpmdev cuse-tpm,id=tpm0,path=/dev/vtpm -device tpm-tis,tpmdev=tpm0
+@end example
+
+@item -tpmdev unixio-tpm, id=@var{id}, path=@var{path}, ctrl-path=@var{ctrl-path}
+
+(Linux-host only) Enable access to a TPM emulator with a CUSE interface.
+
+@option{path} specifies the path to the CUSE TPM character device.
+@option{ctrl-path} specifies the unix socket path to the TPM device for out-of-band messages
+
+To create a backend device accessing the  TPM emulator using unix socket
+use the following two options:
+@example
+-tpmdev unixio-tpm,id=tpm0,path=/tmp/tpm-sock,ctrl-path=/tmp/tpm-ctrl-sock -device tpm-tis,tpmdev=tpm0
 @end example
 
 @end table

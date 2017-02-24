@@ -3965,10 +3965,11 @@
 # @passthrough: TPM passthrough type
 # @cuse-tpm: CUSE TPM type
 #            Since: 2.6
+# @unixio-tpm: unixio TPM type
 #
 # Since: 1.5
 ##
-{ 'enum': 'TpmType', 'data': [ 'passthrough', 'cuse-tpm' ] }
+{ 'enum': 'TpmType', 'data': [ 'passthrough', 'cuse-tpm', 'unixio-tpm' ] }
 
 ##
 # @query-tpm-types:
@@ -3994,7 +3995,8 @@
 # Since: 1.5
 ##
 { 'struct': 'TPMPassthroughOptions', 'data': { '*path' : 'str',
-                                             '*cancel-path' : 'str'} }
+                                             '*ctrl-path' : 'str',
+                                             '*cancel-path' : 'str' } }
 
 ##
 # @TPMCuseOptions:
@@ -4002,10 +4004,24 @@
 # Information about the CUSE TPM type
 #
 # @path: string describing the path used for accessing the TPM device
+# @ctrl-path: string describing the unix socket path used for accessing out-of-bound messages
 #
 # Since: 2.6
 ##
-{ 'struct': 'TPMCuseOptions', 'data': { 'path' : 'str'}}
+{ 'struct': 'TPMCuseOptions', 'data': { 'path' : 'str' } }
+
+##
+# @TPMUnixioOptions:
+#
+# Information about the unixio TPM type
+#
+# @path: string describing the path used for accessing the TPM device
+# @ctrl-path: string describing the unix socket path used for accessing out-of-bound messages
+#
+# Since: 2.6
+##
+{ 'struct': 'TPMUnixioOptions', 'data': { 'path' : 'str', 'ctrl-path': 'str' } }
+
 
 ##
 # @TpmTypeOptions:
@@ -4018,7 +4034,8 @@
 ##
 { 'union': 'TpmTypeOptions',
    'data': { 'passthrough' : 'TPMPassthroughOptions',
-             'cuse-tpm' : 'TPMCuseOptions' } }
+             'cuse-tpm' : 'TPMCuseOptions',
+             'unixio-tpm' : 'TPMUnixioOptions' } }
 
 ##
 # @TPMInfo:

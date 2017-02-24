@@ -33,6 +33,78 @@
     } \
 } while (0)
 
+static unsigned long ioctl_to_cmd(unsigned long ioctlnum)
+{
+    /* the ioctl number contains the command number - 1 */
+    return ((ioctlnum >> _IOC_NRSHIFT) & _IOC_NRMASK) + 1;
+}
+
+int tpm_util_ctrlcmd(int fd, bool is_dev, unsigned long cmd, void *msg, size_t msg_len_in,
+                   size_t msg_len_out)
+{
+    int n;
+
+    if (is_dev) {
+        n = ioctl(fd, cmd, msg);
+    } else {
+        uint32_t cmd_no = cpu_to_be32(ioctl_to_cmd(cmd));
+        struct iovec iov[2] = {
+            {
+                .iov_base = &cmd_no,
+                .iov_len = sizeof(cmd_no),
+            }, {
+                .iov_base = msg,
+                .iov_len = msg_len_in,
+            },
+        };
+
+        n = writev(fd, iov, 2);
+        if (n > 0) {
+            if (msg_len_out > 0) {
+                n = read(fd, msg, msg_len_out);
+                /* simulate ioctl return value */
+                if (n > 0) {
+                    n = 0;
+                }
+            } else {
+                /* simulate ioctl return value */
+                n = 0;
+            }
+        }
+    }
+    return n;
+}
+
+int tpm_util_unixio_connect(const char *unix_path)
+{
+    int fd = -1;
+
+    if (unix_path) {
+        fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (fd > 0) {
+            struct sockaddr_un addr;
+
+            if (strlen(unix_path) + 1 > sizeof(addr.sun_path)) {
+                DPRINTF("Socket path is too long.");
+                return -1;
+            }
+
+            addr.sun_family = AF_UNIX;
+            strcpy(addr.sun_path, unix_path);
+
+            if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+                close(fd);
+                return -1;
+            }
+        }
+
+        if (fd < 0) {
+            DPRINTF("Could not connect using socket.");
+        }
+    }
+
+    return fd;
+}
 
 /*
  * A basic test of a TPM device. We expect a well formatted response header
@@ -148,12 +220,14 @@ static void tpm_sized_buffer_reset(TPMSizedBuffer *tsb)
  * Transfer a TPM state blob from the TPM into a provided buffer.
  *
  * @fd: file descriptor to talk to the CUSE TPM
+ * @is_dev: if the fd is CUSE device
  * @type: the type of blob to transfer
  * @decrypted_blob: whether we request to receive decrypted blobs
  * @tsb: the TPMSizeBuffer to fill with the blob
  * @flags: the flags to return to the caller
  */
 static int tpm_util_cuse_get_state_blob(int fd,
+                                        bool is_dev,
                                         uint8_t type,
                                         bool decrypted_blob,
                                         TPMSizedBuffer *tsb,
@@ -164,17 +238,32 @@ static int tpm_util_cuse_get_state_blob(int fd,
     ptm_res res;
     ssize_t n;
     size_t to_read;
+    uint32_t state_flag = (decrypted_blob) ? PTM_STATE_FLAG_DECRYPTED : 0;
 
     tpm_sized_buffer_reset(tsb);
 
-    pgs.u.req.state_flags = (decrypted_blob) ? PTM_STATE_FLAG_DECRYPTED : 0;
-    pgs.u.req.type = type;
-    pgs.u.req.offset = offset;
+    if (!is_dev) {
+        pgs.u.req.state_flags = cpu_to_be32(state_flag);
+        pgs.u.req.type = cpu_to_be32(type);
+        pgs.u.req.offset = cpu_to_be32(offset);
+    } else {
+        pgs.u.req.state_flags = state_flag;
+        pgs.u.req.type = type;
+        pgs.u.req.offset = offset;
+    } 
 
-    if (ioctl(fd, PTM_GET_STATEBLOB, &pgs) < 0) {
+    if (tpm_util_ctrlcmd(fd, TRUE, PTM_GET_STATEBLOB, &pgs, sizeof(pgs.u.req),
+                         sizeof(pgs)) < 0) {
         error_report("CUSE TPM PTM_GET_STATEBLOB ioctl failed: %s",
                      strerror(errno));
         goto err_exit;
+    }
+
+    if (!is_dev) {
+        pgs.u.resp.state_flags = be32_to_cpu(pgs.u.resp.state_flags);
+        pgs.u.resp.totlength = be32_to_cpu(pgs.u.resp.totlength);
+        pgs.u.resp.length = be32_to_cpu(pgs.u.resp.length);
+        pgs.u.resp.tpm_result = be32_to_cpu(pgs.u.resp.tpm_result);
     }
     res = pgs.u.resp.tpm_result;
     if (res != 0 && (res & 0x800) == 0) {
@@ -182,7 +271,6 @@ static int tpm_util_cuse_get_state_blob(int fd,
                      "error 0x%x", type, res);
         goto err_exit;
     }
-
     *flags = pgs.u.resp.state_flags;
 
     tsb->buffer = g_malloc(pgs.u.resp.totlength);
@@ -215,18 +303,19 @@ err_exit:
 }
 
 int tpm_util_cuse_get_state_blobs(int tpm_fd,
+                                  bool is_dev,
                                   bool decrypted_blobs,
                                   TPMBlobBuffers *tpm_blobs)
 {
-    if (tpm_util_cuse_get_state_blob(tpm_fd, PTM_BLOB_TYPE_PERMANENT,
+    if (tpm_util_cuse_get_state_blob(tpm_fd, is_dev, PTM_BLOB_TYPE_PERMANENT,
                                      decrypted_blobs,
                                      &tpm_blobs->permanent,
                                      &tpm_blobs->permanent_flags) ||
-       tpm_util_cuse_get_state_blob(tpm_fd, PTM_BLOB_TYPE_VOLATILE,
+       tpm_util_cuse_get_state_blob(tpm_fd, is_dev, PTM_BLOB_TYPE_VOLATILE,
                                      decrypted_blobs,
                                      &tpm_blobs->volatil,
                                      &tpm_blobs->volatil_flags) ||
-       tpm_util_cuse_get_state_blob(tpm_fd, PTM_BLOB_TYPE_SAVESTATE,
+       tpm_util_cuse_get_state_blob(tpm_fd, is_dev, PTM_BLOB_TYPE_SAVESTATE,
                                      decrypted_blobs,
                                      &tpm_blobs->savestate,
                                      &tpm_blobs->savestate_flags)) {
@@ -244,21 +333,31 @@ int tpm_util_cuse_get_state_blobs(int tpm_fd,
 }
 
 static int tpm_util_cuse_do_set_stateblob_ioctl(int fd,
+                                                bool is_dev,
                                                 uint32_t flags,
                                                 uint32_t type,
                                                 uint32_t length)
 {
     ptm_setstate pss;
 
-    pss.u.req.state_flags = flags;
-    pss.u.req.type = type;
-    pss.u.req.length = length;
+    if (!is_dev) {
+        pss.u.req.state_flags = cpu_to_be32(flags);
+        pss.u.req.type = cpu_to_be32(type);
+        pss.u.req.length = cpu_to_be32(length);
+    } else {
+        pss.u.req.state_flags = flags;
+        pss.u.req.type = type;
+        pss.u.req.length = length;
+    }
 
-    if (ioctl(fd, PTM_SET_STATEBLOB, &pss) < 0) {
+    if (tpm_util_ctrlcmd(fd, is_dev, PTM_SET_STATEBLOB, &pss, 
+            offsetof(ptm_setstate, u.req.data) + 0, sizeof(pss)) < 0) {
         error_report("CUSE TPM PTM_SET_STATEBLOB ioctl failed: %s",
                      strerror(errno));
         return 1;
     }
+
+    if (!is_dev) pss.u.resp.tpm_result = be32_to_cpu(pss.u.resp.tpm_result);
 
     if (pss.u.resp.tpm_result != 0) {
         error_report("Setting the stateblob (type %d) failed with a TPM "
@@ -279,6 +378,7 @@ static int tpm_util_cuse_do_set_stateblob_ioctl(int fd,
  * @flags: Flags describing the (encryption) state of the TPM state blob
  */
 static int tpm_util_cuse_set_state_blob(int fd,
+                                        bool is_dev,
                                         uint32_t type,
                                         TPMSizedBuffer *tsb,
                                         uint32_t flags)
@@ -288,7 +388,7 @@ static int tpm_util_cuse_set_state_blob(int fd,
     size_t to_write;
 
     /* initiate the transfer to the CUSE TPM */
-    if (tpm_util_cuse_do_set_stateblob_ioctl(fd, flags, type, 0)) {
+    if (tpm_util_cuse_do_set_stateblob_ioctl(fd, is_dev, flags, type, 0)) {
         return 1;
     }
 
@@ -309,7 +409,7 @@ static int tpm_util_cuse_set_state_blob(int fd,
     }
 
     /* inidicate that the transfer is finished */
-    if (tpm_util_cuse_do_set_stateblob_ioctl(fd, flags, type, 0)) {
+    if (tpm_util_cuse_do_set_stateblob_ioctl(fd, is_dev, flags, type, 0)) {
         goto err_exit;
     }
 
@@ -322,25 +422,24 @@ err_exit:
     return 1;
 }
 
-int tpm_util_cuse_set_state_blobs(int tpm_fd,
+int tpm_util_cuse_set_state_blobs(int tpm_fd, bool is_dev,
                                   TPMBlobBuffers *tpm_blobs)
 {
     ptm_res res;
 
-    if (ioctl(tpm_fd, PTM_STOP, &res) < 0) {
-        error_report("tpm_passthrough: Could not stop "
-                     "the CUSE TPM: %s (%i)",
+    if (tpm_util_ctrlcmd(tpm_fd, is_dev, PTM_STOP, &res, 0, sizeof(res)) < 0) {
+        error_report("tpm_passthrough: Could not stop the CUSE TPM: %s (%i)",
                      strerror(errno), errno);
         return 1;
     }
 
-    if (tpm_util_cuse_set_state_blob(tpm_fd, PTM_BLOB_TYPE_PERMANENT,
+    if (tpm_util_cuse_set_state_blob(tpm_fd, is_dev, PTM_BLOB_TYPE_PERMANENT,
                                      &tpm_blobs->permanent,
                                      tpm_blobs->permanent_flags) ||
-        tpm_util_cuse_set_state_blob(tpm_fd, PTM_BLOB_TYPE_VOLATILE,
+        tpm_util_cuse_set_state_blob(tpm_fd, is_dev, PTM_BLOB_TYPE_VOLATILE,
                                      &tpm_blobs->volatil,
                                      tpm_blobs->volatil_flags) ||
-        tpm_util_cuse_set_state_blob(tpm_fd, PTM_BLOB_TYPE_SAVESTATE,
+        tpm_util_cuse_set_state_blob(tpm_fd, is_dev, PTM_BLOB_TYPE_SAVESTATE,
                                      &tpm_blobs->savestate,
                                      tpm_blobs->savestate_flags)) {
         return 1;

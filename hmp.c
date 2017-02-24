@@ -971,6 +971,15 @@ void hmp_info_tpm(Monitor *mon, const QDict *qdict)
                            tpo->has_path ? ",path=" : "",
                            tpo->has_path ? tpo->path : "");
             break;
+ 
+        case TPM_TYPE_OPTIONS_KIND_UNIXIO_TPM:
+            tpo = ti->options->u.passthrough.data;
+            monitor_printf(mon, "%s%s%s%s",
+                           tpo->has_path ? ",path=" : "",
+                           tpo->has_path ? tpo->path : "",
+                           tpo->has_ctrl_path ? ",ctrl-path=" : "",
+                           tpo->has_ctrl_path ? tpo->ctrl_path : "");
+            break;
         case TPM_TYPE_OPTIONS_KIND__MAX:
             break;
         }
