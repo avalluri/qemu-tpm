@@ -22,6 +22,82 @@
 #include "qemu/osdep.h"
 #include "tpm_util.h"
 #include "tpm_int.h"
+#include "tpm_ioctl.h"
+#include "qemu/error-report.h"
+
+#define DEBUG_TPM 0
+
+#define DPRINTF(fmt, ...) do { \
+    if (DEBUG_TPM) { \
+        fprintf(stderr, fmt, ## __VA_ARGS__); \
+    } \
+} while (0)
+
+int tpm_util_unix_write(int fd, const uint8_t *buf, uint32_t len)
+{
+    int ret, remain;
+
+    remain = len;
+    while (remain > 0) {
+        ret = write(fd, buf, remain);
+        if (ret < 0) {
+            if (errno != EINTR && errno != EAGAIN) {
+                return -1;
+            }
+        } else if (ret == 0) {
+            break;
+        } else {
+            buf += ret;
+            remain -= ret;
+        }
+    }
+    return len - remain;
+}
+
+int tpm_util_unix_read(int fd, uint8_t *buf, uint32_t len)
+{
+    int ret;
+ reread:
+    ret = read(fd, buf, len);
+    if (ret < 0) {
+        if (errno != EINTR && errno != EAGAIN) {
+            return -1;
+        }
+        goto reread;
+    }
+    return ret;
+}
+
+static unsigned long ioctl_to_cmd(unsigned long ioctlnum)
+{
+    /* the ioctl number contains the command number - 1 */
+    return ((ioctlnum >> _IOC_NRSHIFT) & _IOC_NRMASK) + 1;
+}
+
+int tpm_util_ctrlcmd(int fd, unsigned long cmd, void *msg, size_t msg_len_in,
+                   size_t msg_len_out)
+{
+    int n;
+
+    uint32_t cmd_no = cpu_to_be32(ioctl_to_cmd(cmd));
+    struct iovec iov[2] = {
+        { .iov_base = &cmd_no, .iov_len = sizeof(cmd_no), },
+        { .iov_base = msg, .iov_len = msg_len_in, },
+    };
+
+    if ((n = writev(fd, iov, 2)) > 0) {
+        if (msg_len_out > 0) {
+	        n = read(fd, msg, msg_len_out);
+	        /* simulate ioctl return value */
+	        if (n > 0) {
+	            n = 0;
+	        }
+        } else {
+            n = 0;
+        }
+    }
+    return n;
+}
 
 /*
  * A basic test of a TPM device. We expect a well formatted response header
