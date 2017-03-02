@@ -24,7 +24,11 @@
 
 #include "sysemu/tpm_backend.h"
 
-int tpm_util_unixio_connect(const char *unix_path);
+int tpm_util_unix_write(int fd, const uint8_t *buf, uint32_t len);
+
+int tpm_util_unix_read(int fd, uint8_t *buf, uint32_t len);
+
+int tpm_util_unix_connect(const char *unix_path);
 
 int tpm_util_ctrlcmd(int fd, unsigned long cmd, void *msg,
                      size_t msg_len_in, size_t msg_len_out);

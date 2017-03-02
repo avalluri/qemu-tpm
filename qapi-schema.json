@@ -3963,7 +3963,7 @@
 #
 # Since: 1.5
 ##
-{ 'enum': 'TpmType', 'data': [ 'passthrough', 'unixio-tpm' ] }
+{ 'enum': 'TpmType', 'data': [ 'passthrough', 'emulator' ] }
 
 ##
 # @query-tpm-types:
@@ -3989,21 +3989,21 @@
 # Since: 1.5
 ##
 { 'struct': 'TPMPassthroughOptions', 'data': { '*path' : 'str',
-                                               '*cancel-path' : 'str',
-                                               '*ctrl-path' : 'str' } }
+                                               '*cancel-path' : 'str' } }
 
 ##
 ##
-# @TPMUnixioOptions:
+# @TPMEmulatorOptions:
 #
-# Information about the unixio TPM type
+# Information about the TPM emulator
 #
-# @path: string describing the path used for accessing the TPM device
-# @ctrl-path: string describing the unix socket path used for accessing out-of-bound messages
+# 
+# @tpmstatedir: TPM emilator state dir
+# @path: TPM emulator binary path to use
 #
 # Since: 2.6
 ##
-{ 'struct': 'TPMUnixioOptions', 'data': { 'path' : 'str', 'ctrl-path': 'str' } }
+{ 'struct': 'TPMEmulatorOptions', 'data': { 'tpmstatedir' : 'str', '*path': 'str' } }
 
 ##
 # @TpmTypeOptions:
@@ -4015,8 +4015,8 @@
 # Since: 1.5
 ##
 { 'union': 'TpmTypeOptions',
-   'data': { 'passthrough' : 'TPMPassthroughOptions',
-             'unixio-tpm' : 'TPMUnixioOptions' } }
+  'data': { 'passthrough' : 'TPMPassthroughOptions',
+            'emulator' : 'TPMEmulatorOptions' } }
 
 ##
 # @TPMInfo:

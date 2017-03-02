@@ -253,6 +253,7 @@ static TPMInfo *qmp_query_tpm_inst(TPMBackend *drv)
 {
     TPMInfo *res = g_new0(TPMInfo, 1);
     TPMPassthroughOptions *tpo;
+    TPMEmulatorOptions *teo;
 
     res->id = g_strdup(drv->id);
     res->model = drv->fe_model;
@@ -272,19 +273,10 @@ static TPMInfo *qmp_query_tpm_inst(TPMBackend *drv)
             tpo->has_cancel_path = true;
         }
         break;
-    case TPM_TYPE_UNIXIO_TPM:
-        res->options->type = TPM_TYPE_OPTIONS_KIND_UNIXIO_TPM;
-        tpo = g_new0(TPMPassthroughOptions, 1);
-        res->options->u.passthrough.data = tpo;
-        if (drv->path) {
-            tpo->path = g_strdup(drv->path);
-            tpo->has_path = true;
-        }
-	
-	if (drv->ctrl_path) {
-            tpo->ctrl_path = g_strdup(drv->ctrl_path);
-            tpo->has_ctrl_path = true;
-        }
+    case TPM_TYPE_EMULATOR:
+        res->options->type = TPM_TYPE_OPTIONS_KIND_EMULATOR;
+        teo = g_new0(TPMEmulatorOptions, 1);
+        res->options->u.emulator.data = teo;
         break;
     case TPM_TYPE__MAX:
         break;

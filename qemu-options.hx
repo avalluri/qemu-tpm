@@ -2793,10 +2793,9 @@ DEF("tpmdev", HAS_ARG, QEMU_OPTION_tpmdev, \
     "-tpmdev passthrough,id=id[,path=path][,cancel-path=path]\n"
     "                use path to provide path to a character device; default is /dev/tpm0\n"
     "                use cancel-path to provide path to TPM's cancel sysfs entry; if\n"
-"                TPM emulator providing a CUSE interface\n"
-    "-tpmdev unixio-tpm,id=id,path=path,ctrl-path=path\n"
-    "                use path to provide path to a unix socket path to talk to the\n"
-    "                TPM emulator for out-of-bound messages\n",
+    "-tpmdev emulator,id=id,tpmstatedir=dir[,path=emulator-path]\n"
+    "                use tpmstatedir to provide path to the tpm state dirctory\n"
+    "                use path to provide the emulator binary to launch; default is 'swtpm'\n",
     QEMU_ARCH_ALL)
 STEXI
 
@@ -2806,7 +2805,7 @@ The general form of a TPM device option is:
 @item -tpmdev @var{backend} ,id=@var{id} [,@var{options}]
 @findex -tpmdev
 Backend type must be either one of the following:
-@option{passthrough}, @option{unixio-tpm}.
+@option{passthrough}, @option{emulator}.
 
 The specific backend type will determine the applicable options.
 The @code{-tpmdev} option creates the TPM backend and requires a
@@ -2856,17 +2855,17 @@ To create a passthrough TPM use the following two options:
 Note that the @code{-tpmdev} id is @code{tpm0} and is referenced by
 @code{tpmdev=tpm0} in the device option.
 
-@item -tpmdev unixio-tpm, id=@var{id}, path=@var{path}, ctrl-path=@var{ctrl-path}
+@item -tpmdev emulator, id=@var{id}, tpmstatedir=@var{path}, path=@var{emulator-binary-path}
 
-(Linux-host only) Enable access to a TPM emulator with a CUSE interface.
+(Linux-host only) Enable access to a TPM emulator.
 
-@option{path} specifies the path to the CUSE TPM character device.
-@option{ctrl-path} specifies the unix socket path to the TPM device for out-of-band messages
+@option{tpmstatedir} specifies the path to the CUSE TPM character device.
+@option{path} specifies the emulator binary path to use
 
-To create a backend device accessing the  TPM emulator using unix socket
+To create a backend device accessing the TPM emulator using unix socket
 use the following two options:
 @example
--tpmdev unixio-tpm,id=tpm0,path=/tmp/tpm-sock,ctrl-path=/tmp/tpm-ctrl-sock -device tpm-tis,tpmdev=tpm0
+-tpmdev emulator,id=tpm0,tpmstatedir=/tmp/my-tpm,path=/usr/local/bin/swtpm -device tpm-tis,tpmdev=tpm0
 @end example
 
 @end table
