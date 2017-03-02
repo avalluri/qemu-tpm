@@ -25,7 +25,7 @@ static QLIST_HEAD(, TPMBackend) tpm_backends =
 
 
 #define TPM_MAX_MODELS      1
-#define TPM_MAX_DRIVERS     1
+#define TPM_MAX_DRIVERS     2
 
 static TPMDriverOps const *be_drivers[TPM_MAX_DRIVERS] = {
     NULL,
@@ -271,6 +271,11 @@ static TPMInfo *qmp_query_tpm_inst(TPMBackend *drv)
             tpo->cancel_path = g_strdup(drv->cancel_path);
             tpo->has_cancel_path = true;
         }
+        break;
+    case TPM_TYPE_EMULATOR:
+        res->options->type = TPM_TYPE_OPTIONS_KIND_EMULATOR;
+        res->options->u.emulator.data = 
+            (TPMEmulatorOptions*) tpm_backend_get_tpm_options(drv);
         break;
     case TPM_TYPE__MAX:
         break;
