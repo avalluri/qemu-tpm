@@ -3976,6 +3976,14 @@
 { 'command': 'query-tpm-types', 'returns': ['TpmType'] }
 
 ##
+# @TPMOptions:
+#
+# Base type for TPM options
+##
+{ 'struct': 'TPMOptions',
+  'data': { } }
+
+##
 # @TPMPassthroughOptions:
 #
 # Information about the TPM passthrough type
@@ -3987,8 +3995,8 @@
 #
 # Since: 1.5
 ##
-{ 'struct': 'TPMPassthroughOptions', 'data': { '*path' : 'str',
-                                             '*cancel-path' : 'str'} }
+{ 'struct': 'TPMPassthroughOptions', 'inherits': 'TPMOptions',
+  'data': { '*path' : 'str', '*cancel-path' : 'str'} }
 
 ##
 # @TpmTypeOptions:
@@ -4000,7 +4008,7 @@
 # Since: 1.5
 ##
 { 'union': 'TpmTypeOptions',
-   'data': { 'passthrough' : 'TPMPassthroughOptions' } }
+  'data': { 'passthrough' : 'TPMPassthroughOptions' } }
 
 ##
 # @TPMInfo:
