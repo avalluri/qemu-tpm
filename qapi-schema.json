@@ -5137,6 +5137,16 @@
 { 'command': 'query-tpm-types', 'returns': ['TpmType'] }
 
 ##
+# @TPMOptions:
+#
+# Base type for TPM options
+#
+# Since: 2.10
+##
+{ 'struct': 'TPMOptions',
+  'data': { } }
+
+##
 # @TPMPassthroughOptions:
 #
 # Information about the TPM passthrough type
@@ -5148,20 +5158,9 @@
 #
 # Since: 1.5
 ##
-{ 'struct': 'TPMPassthroughOptions', 'data': { '*path' : 'str',
-                                             '*cancel-path' : 'str'} }
+{ 'struct': 'TPMPassthroughOptions', 'base': 'TPMOptions',
+  'data': { '*path' : 'str', '*cancel-path' : 'str'} }
 
-##
-# @TpmTypeOptions:
-#
-# A union referencing different TPM backend types' configuration options
-#
-# @type: 'passthrough' The configuration options for the TPM passthrough type
-#
-# Since: 1.5
-##
-{ 'union': 'TpmTypeOptions',
-   'data': { 'passthrough' : 'TPMPassthroughOptions' } }
 
 ##
 # @TPMInfo:
@@ -5169,6 +5168,8 @@
 # Information about the TPM
 #
 # @id: The Id of the TPM
+#
+# @type: The TPM backend type
 #
 # @model: The TPM frontend model
 #
@@ -5178,8 +5179,9 @@
 ##
 { 'struct': 'TPMInfo',
   'data': {'id': 'str',
+           'type': 'TpmType',
            'model': 'TpmModel',
-           'options': 'TpmTypeOptions' } }
+           'options': 'TPMOptions' } }
 
 ##
 # @query-tpm:
@@ -5196,13 +5198,12 @@
 # <- { "return":
 #      [
 #        { "model": "tpm-tis",
+#          "type": "passthrough",
 #          "options":
-#            { "type": "passthrough",
-#              "data":
-#                { "cancel-path": "/sys/class/misc/tpm0/device/cancel",
-#                  "path": "/dev/tpm0"
-#                }
-#            },
+#          {
+#            "cancel-path": "/sys/class/misc/tpm0/device/cancel",
+#            "path": "/dev/tpm0"
+#          },
 #          "id": "tpm0"
 #        }
 #      ]
