@@ -46,22 +46,9 @@
 #define TPM_PASSTHROUGH(obj) \
     OBJECT_CHECK(TPMPassthruState, (obj), TYPE_TPM_PASSTHROUGH)
 
-static const TPMDriverOps tpm_passthrough_driver;
-
 /* data structures */
-typedef struct TPMPassthruThreadParams {
-    TPMState *tpm_state;
-
-    TPMRecvDataCB *recv_data_callback;
-    TPMBackend *tb;
-} TPMPassthruThreadParams;
-
 struct TPMPassthruState {
     TPMBackend parent;
-
-    TPMBackendThread tbt;
-
-    TPMPassthruThreadParams tpm_thread_params;
 
     char *tpm_dev;
     int tpm_fd;
@@ -216,12 +203,9 @@ static int tpm_passthrough_unix_transfer(TPMPassthruState *tpm_pt,
                                         selftest_done);
 }
 
-static void tpm_passthrough_worker_thread(gpointer data,
-                                          gpointer user_data)
+static void tpm_passthrough_handle_request(TPMBackend *tb, TPMBackendCmd cmd)
 {
-    TPMPassthruThreadParams *thr_parms = user_data;
-    TPMPassthruState *tpm_pt = TPM_PASSTHROUGH(thr_parms->tb);
-    TPMBackendCmd cmd = (TPMBackendCmd)data;
+    TPMPassthruState *tpm_pt = TPM_PASSTHROUGH(tb);
     bool selftest_done = false;
 
     DPRINTF("tpm_passthrough: processing command type %d\n", cmd);
@@ -229,12 +213,12 @@ static void tpm_passthrough_worker_thread(gpointer data,
     switch (cmd) {
     case TPM_BACKEND_CMD_PROCESS_CMD:
         tpm_passthrough_unix_transfer(tpm_pt,
-                                      thr_parms->tpm_state->locty_data,
+                                      tb->tpm_state->locty_data,
                                       &selftest_done);
 
-        thr_parms->recv_data_callback(thr_parms->tpm_state,
-                                      thr_parms->tpm_state->locty_number,
-                                      selftest_done);
+        tb->recv_data_callback(tb->tpm_state,
+                               tb->tpm_state->locty_number,
+                               selftest_done);
         break;
     case TPM_BACKEND_CMD_INIT:
     case TPM_BACKEND_CMD_END:
@@ -242,24 +226,6 @@ static void tpm_passthrough_worker_thread(gpointer data,
         /* nothing to do */
         break;
     }
-}
-
-/*
- * Start the TPM (thread). If it had been started before, then terminate
- * and start it again.
- */
-static int tpm_passthrough_startup_tpm(TPMBackend *tb)
-{
-    TPMPassthruState *tpm_pt = TPM_PASSTHROUGH(tb);
-
-    /* terminate a running TPM */
-    tpm_backend_thread_end(&tpm_pt->tbt);
-
-    tpm_backend_thread_create(&tpm_pt->tbt,
-                              tpm_passthrough_worker_thread,
-                              &tpm_pt->tpm_thread_params);
-
-    return 0;
 }
 
 static void tpm_passthrough_reset(TPMBackend *tb)
@@ -270,21 +236,7 @@ static void tpm_passthrough_reset(TPMBackend *tb)
 
     tpm_passthrough_cancel_cmd(tb);
 
-    tpm_backend_thread_end(&tpm_pt->tbt);
-
     tpm_pt->had_startup_error = false;
-}
-
-static int tpm_passthrough_init(TPMBackend *tb, TPMState *s,
-                                TPMRecvDataCB *recv_data_cb)
-{
-    TPMPassthruState *tpm_pt = TPM_PASSTHROUGH(tb);
-
-    tpm_pt->tpm_thread_params.tpm_state = s;
-    tpm_pt->tpm_thread_params.recv_data_callback = recv_data_cb;
-    tpm_pt->tpm_thread_params.tb = tb;
-
-    return 0;
 }
 
 static bool tpm_passthrough_get_tpm_established_flag(TPMBackend *tb)
@@ -315,13 +267,6 @@ static size_t tpm_passthrough_realloc_buffer(TPMSizedBuffer *sb)
         sb->size = wanted_size;
     }
     return sb->size;
-}
-
-static void tpm_passthrough_deliver_request(TPMBackend *tb)
-{
-    TPMPassthruState *tpm_pt = TPM_PASSTHROUGH(tb);
-
-    tpm_backend_thread_deliver_request(&tpm_pt->tbt);
 }
 
 static void tpm_passthrough_cancel_cmd(TPMBackend *tb)
@@ -371,7 +316,6 @@ static TPMVersion tpm_passthrough_get_tpm_version(TPMBackend *tb)
  */
 static int tpm_passthrough_open_sysfs_cancel(TPMBackend *tb)
 {
-    TPMPassthruState *tpm_pt = TPM_PASSTHROUGH(tb);
     int fd = -1;
     char *dev;
     char path[PATH_MAX];
@@ -458,12 +402,6 @@ static TPMBackend *tpm_passthrough_create(QemuOpts *opts, const char *id)
     TPMBackend *tb = TPM_BACKEND(obj);
     TPMPassthruState *tpm_pt = TPM_PASSTHROUGH(tb);
 
-    tb->id = g_strdup(id);
-    /* let frontend set the fe_model to proper value */
-    tb->fe_model = -1;
-
-    tb->ops = &tpm_passthrough_driver;
-
     if (tpm_passthrough_handle_device_opts(opts, tb)) {
         goto err_exit;
     }
@@ -473,10 +411,12 @@ static TPMBackend *tpm_passthrough_create(QemuOpts *opts, const char *id)
         goto err_exit;
     }
 
+    tb->id = g_strdup(id);
+
     return tb;
 
 err_exit:
-    g_free(tb->id);
+    object_unref(obj);
 
     return NULL;
 }
@@ -486,8 +426,6 @@ static void tpm_passthrough_destroy(TPMBackend *tb)
     TPMPassthruState *tpm_pt = TPM_PASSTHROUGH(tb);
 
     tpm_passthrough_cancel_cmd(tb);
-
-    tpm_backend_thread_end(&tpm_pt->tbt);
 
     qemu_close(tpm_pt->tpm_fd);
     qemu_close(tpm_pt->cancel_fd);
@@ -519,12 +457,9 @@ static const TPMDriverOps tpm_passthrough_driver = {
     .desc                     = tpm_passthrough_create_desc,
     .create                   = tpm_passthrough_create,
     .destroy                  = tpm_passthrough_destroy,
-    .init                     = tpm_passthrough_init,
-    .startup_tpm              = tpm_passthrough_startup_tpm,
     .realloc_buffer           = tpm_passthrough_realloc_buffer,
     .reset                    = tpm_passthrough_reset,
     .had_startup_error        = tpm_passthrough_get_startup_error,
-    .deliver_request          = tpm_passthrough_deliver_request,
     .cancel_cmd               = tpm_passthrough_cancel_cmd,
     .get_tpm_established_flag = tpm_passthrough_get_tpm_established_flag,
     .reset_tpm_established_flag = tpm_passthrough_reset_tpm_established_flag,
@@ -544,6 +479,7 @@ static void tpm_passthrough_class_init(ObjectClass *klass, void *data)
     TPMBackendClass *tbc = TPM_BACKEND_CLASS(klass);
 
     tbc->ops = &tpm_passthrough_driver;
+    tbc->handle_request = tpm_passthrough_handle_request;
 }
 
 static const TypeInfo tpm_passthrough_info = {
