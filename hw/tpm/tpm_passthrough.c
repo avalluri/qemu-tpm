@@ -462,8 +462,6 @@ static TPMBackend *tpm_passthrough_create(QemuOpts *opts, const char *id)
     /* let frontend set the fe_model to proper value */
     tb->fe_model = -1;
 
-    tb->ops = &tpm_passthrough_driver;
-
     if (tpm_passthrough_handle_device_opts(opts, tb)) {
         goto err_exit;
     }
