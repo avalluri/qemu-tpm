@@ -420,6 +420,7 @@ static int tpm_emulator_spawn_emulator(TPMEmulator *tpm_pt)
     } 
 
     if (cpid == 0) { /* CHILD */
+        int i;
         char fd_str[128] = "";
         char ctrl_fd_str[128] = "";
         char tpmstate_str[1024] = "";
@@ -447,7 +448,7 @@ static int tpm_emulator_spawn_emulator(TPMEmulator *tpm_pt)
             params[8] = NULL;
         }
         DPRINT("Running cmd: ")
-        for (int i=0; params[i]; i++)
+        for (i=0; params[i]; i++)
              DPRINT(" %s", params[i])
         DPRINT("\n")
         if (execv(tpm_pt->ops.path, (char* const*)params) < 0) {
