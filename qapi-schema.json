@@ -3959,10 +3959,11 @@
 # An enumeration of TPM types
 #
 # @passthrough: TPM passthrough type
+# @eumlator: Software Emulator TPM type
 #
 # Since: 1.5
 ##
-{ 'enum': 'TpmType', 'data': [ 'passthrough' ] }
+{ 'enum': 'TpmType', 'data': [ 'passthrough', 'emulator' ] }
 
 ##
 # @query-tpm-types:
@@ -3995,8 +3996,25 @@
 #
 # Since: 1.5
 ##
-{ 'struct': 'TPMPassthroughOptions', 'inherits': 'TPMOptions',
-  'data': { '*path' : 'str', '*cancel-path' : 'str'} }
+{ 'struct': 'TPMPassthroughOptions',
+  'data': { '*path' : 'str', '*cancel-path' : 'str' } }
+
+##
+##
+# @TPMEmulatorOptions:
+#
+# Information about the TPM emulator
+#
+# @tpmstatedir: TPM emilator state dir
+# @path: TPM emulator binary path to use
+# @logfile: file to use to place TPM emulator logs
+# @loglevel: log level number 
+#
+# Since: 2.6
+##
+{ 'struct': 'TPMEmulatorOptions', 'base': 'TPMOptions',
+  'data': { 'tpmstatedir' : 'str', '*path': 'str',
+            '*logfile' : 'str', '*loglevel' : 'int' } }
 
 ##
 # @TpmTypeOptions:
@@ -4008,7 +4026,8 @@
 # Since: 1.5
 ##
 { 'union': 'TpmTypeOptions',
-  'data': { 'passthrough' : 'TPMPassthroughOptions' } }
+  'data': { 'passthrough' : 'TPMPassthroughOptions',
+            'emulator' : 'TPMEmulatorOptions' } }
 
 ##
 # @TPMInfo:
