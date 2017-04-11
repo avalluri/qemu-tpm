@@ -43,7 +43,9 @@
 #include <sys/stat.h>
 #include <stdio.h>
 
-#define DEBUG_TPM 0
+#define DEBUG_TPM 1
+
+#define UNIFIED_FD
 
 #define DPRINT(fmt, ...) do { \
     if (DEBUG_TPM) { \
@@ -51,7 +53,8 @@
     } \
 } while (0);
 
-#define DPRINTF(fmt, ...) DPRINT("tpm-emulator: "fmt"\n", __VA_ARGS__)
+#define DPRINTF(fmt, ...) \
+    DPRINT("tpm-emulator:"fmt"\n", __VA_ARGS__)
 
 #define TYPE_TPM_EMULATOR "tpm-emulator"
 #define TPM_EMULATOR(obj) \
@@ -64,7 +67,6 @@ typedef struct TPMEmulator {
     TPMBackend parent;
 
     TPMEmulatorOptions *ops;
-    QIOChannel *data_ioc;
     QIOChannel *ctrl_ioc;
     bool op_executing;
     bool op_canceled;
@@ -82,8 +84,8 @@ typedef struct TPMEmulator {
 #define TPM_EMULATOR_IOCTL_TO_CMD(ioctlnum) \
     (((ioctlnum >> _IOC_NRSHIFT) & _IOC_NRMASK) + 1)
 
-static int tpm_emulator_ctrlcmd(QIOChannel *ioc, unsigned long cmd, void *msg,
-                                size_t msg_len_in, size_t msg_len_out)
+static ssize_t tpm_emulator_ctrlcmd(QIOChannel *ioc, unsigned long cmd, void *msg,
+                                    size_t msg_len_in, size_t msg_len_out)
 {
     ssize_t n;
 
@@ -97,10 +99,6 @@ static int tpm_emulator_ctrlcmd(QIOChannel *ioc, unsigned long cmd, void *msg,
     if (n > 0) {
         if (msg_len_out > 0) {
             n = qio_channel_read(ioc, (char *)msg, msg_len_out, NULL);
-            /* simulate ioctl return value */
-            if (n > 0) {
-                n = 0;
-            }
         } else {
             n = 0;
         }
@@ -116,6 +114,11 @@ static int tpm_emulator_unix_tx_bufs(TPMEmulator *tpm_pt,
     ssize_t ret;
     bool is_selftest;
     const struct tpm_resp_hdr *hdr;
+    uint32_t cmd_no = cpu_to_be32(TPM_EMULATOR_IOCTL_TO_CMD(PTM_PROCESS_CMD));
+    struct iovec iov[2] = {
+        { .iov_base = &cmd_no, .iov_len = sizeof(cmd_no), },
+        { .iov_base = (void*)in, .iov_len = in_len, },
+    };
 
     if (!tpm_pt->child_running) {
         return -1;
@@ -127,11 +130,10 @@ static int tpm_emulator_unix_tx_bufs(TPMEmulator *tpm_pt,
 
     is_selftest = tpm_util_is_selftest(in, in_len);
 
-    ret = qio_channel_write(tpm_pt->data_ioc, (const char *)in, (size_t)in_len,
-                            NULL);
-    if (ret != in_len) {
+    ret  = qio_channel_writev(tpm_pt->ctrl_ioc, iov, 2, NULL);
+    if (ret < 0) {
         if (!tpm_pt->op_canceled || errno != ECANCELED) {
-            error_report("tpm-emulator: error while transmitting data "
+            error_report("tpm-emulator: error while sending prcoess cmd"
                          "to TPM: %s (%i)", strerror(errno), errno);
         }
         goto err_exit;
@@ -139,8 +141,7 @@ static int tpm_emulator_unix_tx_bufs(TPMEmulator *tpm_pt,
 
     tpm_pt->op_executing = false;
 
-    ret = qio_channel_read(tpm_pt->data_ioc, (char *)out, (size_t)out_len,
-                           NULL);
+    ret = qio_channel_read(tpm_pt->ctrl_ioc, (char *)out, (size_t)out_len, NULL);
     if (ret < 0) {
         if (!tpm_pt->op_canceled || errno != ECANCELED) {
             error_report("tpm-emulator: error while reading data from "
@@ -148,21 +149,20 @@ static int tpm_emulator_unix_tx_bufs(TPMEmulator *tpm_pt,
         }
     } else if (ret < sizeof(struct tpm_resp_hdr) ||
                be32_to_cpu(((struct tpm_resp_hdr *)out)->len) != ret) {
-        ret = -1;
         error_report("tpm-emulator: received invalid response "
-                     "packet from TPM");
+                     "packet from TPM(%ld vs %u)", ret, be32_to_cpu(((struct
+                     tpm_resp_hdr *)out)->len));
+        ret = -1;
     }
 
     if (is_selftest && (ret >= sizeof(struct tpm_resp_hdr))) {
         hdr = (struct tpm_resp_hdr *)out;
         *selftest_done = (be32_to_cpu(hdr->errcode) == 0);
     }
-
 err_exit:
     if (ret < 0) {
         tpm_util_write_fatal_error_response(out, out_len);
     }
-
     tpm_pt->op_executing = false;
 
     return ret;
@@ -180,7 +180,6 @@ static int tpm_emulator_set_locality(TPMEmulator *tpm_pt,
     DPRINTF("%s : locality: 0x%x", __func__, locty_number);
 
     if (tpm_pt->cur_locty_number != locty_number) {
-        DPRINTF("setting locality : 0x%x", locty_number);
         loc.u.req.loc = cpu_to_be32(locty_number);
         if (tpm_emulator_ctrlcmd(tpm_pt->ctrl_ioc, PTM_SET_LOCALITY, &loc,
                              sizeof(loc), sizeof(loc)) < 0) {
@@ -251,6 +250,93 @@ static void tpm_emulator_shutdown(TPMEmulator *tpm_pt)
         error_report("tpm-emulator: TPM result for sutdown: 0x%x",
                      be32_to_cpu(res));
     }
+}
+
+static int tpm_emulator_test(QIOChannel *ioc, unsigned char *request,
+                         size_t requestlen, uint16_t *return_tag)
+{
+    struct tpm_resp_hdr *resp;
+#if 1
+    fd_set readfds;
+    struct timeval tv = {
+        .tv_sec = 1,
+        .tv_usec = 0,
+    };
+#endif
+    int n;
+    unsigned char buf[1024];
+    uint32_t cmd_no = cpu_to_be32(TPM_EMULATOR_IOCTL_TO_CMD(PTM_PROCESS_CMD));
+    struct iovec iov[] = {
+        { .iov_base = &cmd_no, .iov_len = sizeof(cmd_no), },
+        { .iov_base = request, .iov_len = requestlen, }
+    };
+
+    n = qio_channel_writev(ioc, iov, 2, NULL);
+    if (n < 0) {
+        return errno;
+    }
+#if 1
+    FD_ZERO(&readfds);
+    FD_SET(QIO_CHANNEL_SOCKET(ioc)->fd, &readfds);
+
+    /* wait for a second */
+    n = select(QIO_CHANNEL_SOCKET(ioc)->fd + 1, &readfds, NULL, NULL, &tv);
+    if (n != 1) {
+        return errno;
+    }
+#endif
+    n = qio_channel_read(ioc, (char*)buf, sizeof(buf), NULL);
+    if (n < sizeof(struct tpm_resp_hdr)) {
+        return EFAULT;
+    }
+
+    resp = (struct tpm_resp_hdr *)buf;
+    /* check the header */
+    if (be32_to_cpu(resp->len) != n) {
+        return EBADMSG;
+    }
+
+    *return_tag = be16_to_cpu(resp->tag);
+
+    return 0;
+}
+
+static int tpm_emulator_test_tpmdev(QIOChannel *ioc, TPMVersion *tpm_version)
+{
+    const struct tpm_req_hdr test_req = {
+        .tag = cpu_to_be16(TPM_TAG_RQU_COMMAND),
+        .len = cpu_to_be32(sizeof(test_req)),
+        .ordinal = cpu_to_be32(TPM_ORD_GetTicks),
+    };
+
+    const struct tpm_req_hdr test_req_tpm2 = {
+        .tag = cpu_to_be16(TPM2_ST_NO_SESSIONS),
+        .len = cpu_to_be32(sizeof(test_req_tpm2)),
+        .ordinal = cpu_to_be32(TPM2_CC_ReadClock),
+    };
+    uint16_t return_tag;
+    int ret;
+
+    /* Send TPM 2 command */
+    ret = tpm_emulator_test(ioc, (unsigned char *)&test_req_tpm2,
+                        sizeof(test_req_tpm2), &return_tag);
+    /* TPM 2 would respond with a tag of TPM2_ST_NO_SESSIONS */
+    if (!ret && return_tag == TPM2_ST_NO_SESSIONS) {
+        *tpm_version = TPM_VERSION_2_0;
+        return 0;
+    }
+
+    /* Send TPM 1.2 command */
+    ret = tpm_emulator_test(ioc, (unsigned char *)&test_req,
+                        sizeof(test_req), &return_tag);
+    if (!ret && return_tag == TPM_TAG_RSP_COMMAND) {
+        *tpm_version = TPM_VERSION_1_2;
+        return 0;
+    }
+
+    *tpm_version = TPM_VERSION_UNSPEC;
+
+    return 1;
 }
 
 static int tpm_emulator_probe_caps(TPMEmulator *tpm_pt)
@@ -467,22 +553,11 @@ static QIOChannel *_iochannel_new(const char *path, int fd, Error **err)
 
 static int tpm_emulator_spawn_emulator(TPMEmulator *tpm_pt)
 {
-    int fds[2] = { -1, -1 };
-    int ctrl_fds[2] = { -1, -1 };
     pid_t cpid;
-
-    if (!tpm_pt->ops->has_data_path) {
-        if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, fds) < 0) {
-            return -1;
-        }
-    }
+    int fds[2] = { -1, -1 };
 
     if (!tpm_pt->ops->has_ctrl_path) {
-        if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, ctrl_fds) < 0) {
-            if (!tpm_pt->ops->has_data_path) {
-                closesocket(fds[0]);
-                closesocket(fds[1]);
-            }
+        if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, fds) < 0) {
             return -1;
         }
     }
@@ -494,10 +569,6 @@ static int tpm_emulator_spawn_emulator(TPMEmulator *tpm_pt)
             closesocket(fds[0]);
             closesocket(fds[1]);
         }
-        if (!tpm_pt->ops->has_ctrl_path) {
-            closesocket(ctrl_fds[0]);
-            closesocket(ctrl_fds[1]);
-        }
         return -1;
     }
 
@@ -507,7 +578,6 @@ static int tpm_emulator_spawn_emulator(TPMEmulator *tpm_pt)
         enum {
             PARAM_PATH,
             PARAM_IFACE,
-            PARAM_SERVER,  PARAM_SERVER_ARGS,
             PARAM_CTRL,    PARAM_CTRL_ARGS,
             PARAM_STATE,   PARAM_STATE_ARGS,
             PARAM_PIDFILE, PARAM_PIDFILE_ARGS,
@@ -516,28 +586,17 @@ static int tpm_emulator_spawn_emulator(TPMEmulator *tpm_pt)
         };
 
         int i;
-        int data_fd = -1, ctrl_fd = -1;
         char *argv[PARAM_MAX + 1];
+        int ctrl_fd = -1;
 
         /* close all unused inherited sockets */
         if (fds[0] >= 0) {
             closesocket(fds[0]);
         }
-        if (ctrl_fds[0] >= 0) {
-            closesocket(ctrl_fds[0]);
-        }
 
         i = STDERR_FILENO + 1;
         if (fds[1] >= 0) {
-            data_fd = dup2(fds[1], i++);
-            if (data_fd < 0) {
-                error_report("tpm-emulator: dup2() failure - %s",
-                             strerror(errno));
-                goto exit_child;
-            }
-        }
-        if (ctrl_fds[1] >= 0) {
-            ctrl_fd = dup2(ctrl_fds[1], i++);
+            ctrl_fd = dup2(fds[1], i++);
             if (ctrl_fd < 0) {
                 error_report("tpm-emulator: dup2() failure - %s",
                              strerror(errno));
@@ -551,15 +610,6 @@ static int tpm_emulator_spawn_emulator(TPMEmulator *tpm_pt)
         argv[PARAM_MAX] = NULL;
         argv[PARAM_PATH] = g_strdup(tpm_pt->ops->path);
         argv[PARAM_IFACE] = g_strdup("socket");
-        if (tpm_pt->ops->has_data_path) {
-            argv[PARAM_SERVER] = g_strdup("--server");
-            argv[PARAM_SERVER_ARGS] = g_strdup_printf("type=unixio,path=%s",
-                                               tpm_pt->ops->data_path);
-        } else {
-            argv[PARAM_SERVER] = g_strdup("--fd");
-            argv[PARAM_SERVER_ARGS] = g_strdup_printf("%d", data_fd);
-        }
-
         argv[PARAM_CTRL] = g_strdup("--ctrl");
         if (tpm_pt->ops->has_ctrl_path) {
             argv[PARAM_CTRL_ARGS] = g_strdup_printf("type=unixio,path=%s",
@@ -594,9 +644,6 @@ static int tpm_emulator_spawn_emulator(TPMEmulator *tpm_pt)
 
 exit_child:
         g_strfreev(argv);
-        if (data_fd >= 0) {
-            closesocket(data_fd);
-        }
         if (ctrl_fd >= 0) {
             closesocket(ctrl_fd);
         }
@@ -613,19 +660,8 @@ exit_child:
         if (fds[1] >= 0) {
             closesocket(fds[1]);
         }
-        if (ctrl_fds[1] >= 0) {
-            closesocket(ctrl_fds[1]);
-        }
 
-        tpm_pt->data_ioc = _iochannel_new(tpm_pt->ops->data_path, fds[0], NULL);
-        if (!tpm_pt->data_ioc) {
-            error_report("tpm-emulator: Unable to connect socket : %s",
-                          tpm_pt->ops->data_path);
-            goto err_kill_child;
-        }
-
-        tpm_pt->ctrl_ioc = _iochannel_new(tpm_pt->ops->ctrl_path, ctrl_fds[0],
-                                          NULL);
+        tpm_pt->ctrl_ioc = _iochannel_new(tpm_pt->ops->ctrl_path, fds[0], NULL);
         if (!tpm_pt->ctrl_ioc) {
             error_report("tpm-emulator: Unable to connect socket : %s",
                           tpm_pt->ops->ctrl_path);
@@ -634,7 +670,7 @@ exit_child:
 
         qemu_add_child_watch(cpid);
 
-        qio_channel_add_watch(tpm_pt->data_ioc, G_IO_HUP | G_IO_ERR,
+        qio_channel_add_watch(tpm_pt->ctrl_ioc, G_IO_HUP | G_IO_ERR,
                               tpm_emulator_fd_handler, tpm_pt, NULL);
 
         while ((rc = stat(TPM_EMULATOR_PIDFILE, &st)) < 0 && timeout--) {
@@ -659,7 +695,7 @@ exit_child:
 
 err_kill_child:
     kill(cpid, SIGTERM);
-    /* wait for 10 mill-seconds */
+    /* wait for 10 milliseconds */
     usleep(10 * 1000);
     /* force kill if still reachable */
     if (kill(cpid, 0) == 0) {
@@ -702,18 +738,6 @@ static int tpm_emulator_handle_device_opts(TPMEmulator *tpm_pt, QemuOpts *opts)
     }
     tpm_pt->ops->path = g_strdup(value);
 
-    value = qemu_opt_get(opts, "data-path");
-    if (value) {
-        tpm_pt->ops->has_data_path = true;
-        tpm_pt->ops->data_path = g_strdup(value);
-    } else {
-        tpm_pt->ops->has_data_path = false;
-        if (!tpm_pt->ops->spawn) {
-            error_report("tpm-emulator: missing mandatory data-path");
-            return -1;
-        }
-    }
-
     value = qemu_opt_get(opts, "ctrl-path");
     if (value) {
         tpm_pt->ops->has_ctrl_path = true;
@@ -741,26 +765,17 @@ static int tpm_emulator_handle_device_opts(TPMEmulator *tpm_pt, QemuOpts *opts)
             goto err_close_dev;
         }
     } else {
-        tpm_pt->data_ioc = _iochannel_new(tpm_pt->ops->data_path, -1, NULL);
-        if (tpm_pt->data_ioc  == NULL) {
-            error_report("tpm-emulator: Failed to connect data socket: %s",
-                         tpm_pt->ops->data_path);
-            goto err_close_dev;
-        }
         tpm_pt->ctrl_ioc = _iochannel_new(tpm_pt->ops->ctrl_path, -1, NULL);
         if (tpm_pt->ctrl_ioc == NULL) {
             DPRINTF("Failed to connect control socket: %s",
                     strerror(errno));
             goto err_close_dev;
         }
+
         tpm_pt->child_running = true;
     }
 
-    /* FIXME: tpm_util_test_tpmdev() accepts only on socket fd, as it also used
-     * by passthrough driver, which not yet using GIOChannel.
-     */
-    if (tpm_util_test_tpmdev(QIO_CHANNEL_SOCKET(tpm_pt->data_ioc)->fd,
-                             &tpm_pt->tpm_version)) {
+    if (tpm_emulator_test_tpmdev(tpm_pt->ctrl_ioc, &tpm_pt->tpm_version)) {
         error_report("'%s' is not emulating TPM device.", tpm_pt->ops->path);
         goto err_close_dev;
     }
@@ -895,7 +910,7 @@ static void tpm_emulator_inst_init(Object *obj)
 
     DPRINTF("%s", __func__);
     tpm_pt->ops = g_new0(TPMEmulatorOptions, 1);
-    tpm_pt->data_ioc = tpm_pt->ctrl_ioc = NULL;
+    tpm_pt->ctrl_ioc = NULL;
     tpm_pt->op_executing = tpm_pt->op_canceled = false;
     tpm_pt->child_running = false;
     tpm_pt->cur_locty_number = ~0;
@@ -909,9 +924,6 @@ static void tpm_emulator_inst_finalize(Object *obj)
     tpm_emulator_cancel_cmd(TPM_BACKEND(obj));
     tpm_emulator_shutdown(tpm_pt);
 
-    if (tpm_pt->data_ioc) {
-        qio_channel_close(tpm_pt->data_ioc, NULL);
-    }
     if (tpm_pt->ctrl_ioc) {
         qio_channel_close(tpm_pt->ctrl_ioc, NULL);
     }

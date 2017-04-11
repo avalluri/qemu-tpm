@@ -96,9 +96,9 @@ struct ptm_hdata {
  * with this ioctl and with adjusted offset are necessary. All bytes
  * must be transferred and the transfer is done once the last byte has been
  * returned.
- * It is possible to use the read() interface for reading the data; however, the
- * first bytes of the state blob will be part of the response to the ioctl(); a
- * subsequent read() is only necessary if the total length (totlength) exceeds
+ * It is possible to use the read() interface for reading the data; however,
+ * the first bytes of the state blob will be part of the response to the ioctl();
+ * a subsequent read() is only necessary if the total length (totlength) exceeds
  * the number of received bytes. seek() is not supported.
  */
 struct ptm_getstate {
@@ -166,6 +166,20 @@ struct ptm_getconfig {
     } u;
 };
 
+/*
+ * PTM_PROCESS_CMD:
+ */
+struct ptm_processcmd {
+    union {
+        struct {
+            unsigned char cmd[4096];
+        } req;
+        struct {
+            unsigned char data[4096];
+        } resp;
+    } u;
+};
+
 #define PTM_CONFIG_FLAG_FILE_KEY        0x1
 #define PTM_CONFIG_FLAG_MIGRATION_KEY   0x2
 
@@ -179,6 +193,7 @@ typedef struct ptm_init ptm_init;
 typedef struct ptm_getstate ptm_getstate;
 typedef struct ptm_setstate ptm_setstate;
 typedef struct ptm_getconfig ptm_getconfig;
+typedef struct ptm_processcmd ptm_processcmd;
 
 /* capability flags returned by PTM_GET_CAPABILITY */
 #define PTM_CAP_INIT               (1)
@@ -210,6 +225,7 @@ enum {
     PTM_SET_STATEBLOB      = _IOWR('P', 12, ptm_setstate),
     PTM_STOP               = _IOR('P', 13, ptm_res),
     PTM_GET_CONFIG         = _IOR('P', 14, ptm_getconfig),
+    PTM_PROCESS_CMD        = _IOWR('P', 15, ptm_processcmd),
 };
 
 /*
@@ -238,6 +254,7 @@ enum {
     CMD_SET_STATEBLOB,
     CMD_STOP,
     CMD_GET_CONFIG,
+    CMD_PROCESS_CMD,
 };
 
 #endif /* _TPM_IOCTL_H */
